@@ -167,3 +167,114 @@ def test_duplicate_uploaded_name_is_rejected(client):
     html = response.get_data(as_text=True)
     assert response.status_code == 400
     assert "上传文件名重复" in html
+
+
+MIGRATE = SAMPLE / "migrate"
+
+
+def migrate_uploads():
+    manifest = (io.BytesIO((MIGRATE / "manifest.csv").read_bytes()), "manifest.csv")
+    mapping = (
+        io.BytesIO((MIGRATE / "path-mapping.csv").read_bytes()),
+        "path-mapping.csv",
+    )
+    files = [
+        (
+            io.BytesIO((MIGRATE / name).read_bytes()),
+            name,
+            "application/octet-stream",
+        )
+        for name in (
+            "delete-pos-0001.parquet",
+            "delete-pos-0002.parquet",
+            "delete-pos-stale-0001.parquet",
+        )
+    ]
+    return manifest, mapping, files
+
+
+def test_migrate_page_is_reachable(client):
+    response = client.get("/migrate")
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "路径离线迁移" in html
+    assert 'action="/migrate"' in html
+
+
+def test_migrate_upload_returns_zip(client):
+    manifest, mapping, files = migrate_uploads()
+    response = client.post(
+        "/migrate",
+        data={"manifest": manifest, "mapping": mapping, "files": files},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    assert response.mimetype == "application/zip"
+    assert "migrated-files.zip" in response.headers["Content-Disposition"]
+
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        assert set(archive.namelist()) == {
+            "manifest.csv",
+            "delete-pos-0001.parquet",
+            "delete-pos-0002.parquet",
+            "delete-pos-stale-0001.parquet",
+        }
+
+
+def test_migrate_sample_page_and_zip(client):
+    response = client.get("/migrate/sample")
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "迁移结果" in html
+    assert "data-0001.parquet" in html
+    assert "data-0002.parquet" in html
+
+    response = client.get("/migrate/sample.zip")
+    assert response.status_code == 200
+    assert response.mimetype == "application/zip"
+
+
+def test_migrate_conflict_shows_paths_and_no_zip(client):
+    manifest = (
+        io.BytesIO(
+            (
+                "original_path,uploaded_filename,file_type,data_sequence_number\n"
+                "s3://old/a.parquet,a.parquet,data,1\n"
+                "s3://old/b.parquet,b.parquet,data,1\n"
+            ).encode()
+        ),
+        "manifest.csv",
+    )
+    mapping = (
+        io.BytesIO(
+            b"old_path,new_path\n"
+            b"s3://old/a.parquet,s3://new/shared.parquet\n"
+            b"s3://old/b.parquet,s3://new/shared.parquet\n"
+        ),
+        "mapping.csv",
+    )
+    response = client.post(
+        "/migrate",
+        data={"manifest": manifest, "mapping": mapping},
+        content_type="multipart/form-data",
+    )
+    html = response.get_data(as_text=True)
+    assert response.status_code == 400
+    assert "迁移未完成" in html
+    assert "s3://new/shared.parquet" in html
+    assert "没有输出 ZIP 包" in html
+    assert response.mimetype != "application/zip"
+
+
+def test_migrate_missing_mapping_is_rejected(client):
+    manifest, _, files = migrate_uploads()
+    response = client.post(
+        "/migrate",
+        data={"manifest": manifest, "files": files},
+        content_type="multipart/form-data",
+    )
+    html = response.get_data(as_text=True)
+    assert response.status_code == 400
+    assert "路径对照表" in html

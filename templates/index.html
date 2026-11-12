@@ -16,7 +16,10 @@
         <p>Iceberg v2 源快照 · 仅位置删除（positional deletes）</p>
       </div>
     </div>
-    <a class="button ghost" href="{{ url_for('sample') }}">载入样例</a>
+    <div class="topbar-actions">
+      <a class="button ghost" href="{{ url_for('migrate') }}">离线路径迁移</a>
+      <a class="button ghost" href="{{ url_for('sample') }}">载入样例</a>
+    </div>
   </div>
 </header>
 
@@ -314,6 +317,7 @@
       <div class="form-actions">
         <button class="button primary" type="submit">开始核对</button>
         <a class="button ghost" href="{{ url_for('sample') }}">载入内置样例（演示跳过前面的行组）</a>
+        <a class="button ghost" href="{{ url_for('migrate') }}">对象存储换目录？先做离线路径迁移</a>
         <span class="subtle limit">单次上传上限 {{ max_upload_mb }} MB</span>
       </div>
     </form>

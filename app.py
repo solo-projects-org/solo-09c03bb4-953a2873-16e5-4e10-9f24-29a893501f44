@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import tempfile
 from pathlib import Path
 
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, send_file
 
 from checker.engine import CheckResult, run_check
 from checker.errors import CheckError
 from checker.manifest import parse_manifest
+from checker.migrate import MigrationPackage, build_migration
 
 ROOT = Path(__file__).resolve().parent
 SAMPLE_DIR = ROOT / "sample"
+SAMPLE_MIGRATE_DIR = SAMPLE_DIR / "migrate"
 SAMPLE_TICKETS = "4242, 1003, 4218, 8888, 9999"
 SAMPLE_TICKET_COLUMN = "ticket_no"
+MIGRATED_ZIP_NAME = "migrated-files.zip"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = (
@@ -76,6 +80,17 @@ def _sample_uploaded_paths(manifest) -> dict[str, Path]:
     return paths
 
 
+def _sample_migrate_uploads() -> dict[str, Path]:
+    return {
+        name: SAMPLE_MIGRATE_DIR / name
+        for name in (
+            "delete-pos-0001.parquet",
+            "delete-pos-0002.parquet",
+            "delete-pos-stale-0001.parquet",
+        )
+    }
+
+
 def _render(
     *,
     result: CheckResult | None = None,
@@ -98,6 +113,30 @@ def _render(
         ),
         status,
     )
+
+
+def _render_migrate(
+    *,
+    package: MigrationPackage | None = None,
+    error: CheckError | None = None,
+    source: str = "",
+    status: int = 200,
+):
+    return (
+        render_template(
+            "migrate.html",
+            package=package,
+            error=error,
+            source=source,
+            zip_name=MIGRATED_ZIP_NAME,
+            max_upload_mb=app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024),
+        ),
+        status,
+    )
+
+
+def _migrate_error(exc: CheckError, *, source: str):
+    return _render_migrate(error=exc, source=source, status=400)
 
 
 @app.get("/")
@@ -177,15 +216,97 @@ def check():
     )
 
 
+@app.get("/migrate")
+def migrate():
+    return _render_migrate()
+
+
+def _zip_response(package: MigrationPackage, download_name: str):
+    payload = package.to_zip()
+    return send_file(
+        io.BytesIO(payload),
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=download_name,
+    )
+
+
+@app.post("/migrate")
+def migrate_run():
+    manifest_file = request.files.get("manifest")
+    mapping_file = request.files.get("mapping")
+    delete_files = request.files.getlist("files")
+
+    if manifest_file is None or not manifest_file.filename:
+        return _migrate_error(
+            CheckError("请上传现有格式的 Iceberg v2 CSV 清单。"),
+            source="upload",
+        )
+    if mapping_file is None or not mapping_file.filename:
+        return _migrate_error(
+            CheckError("请上传含 old_path 和 new_path 的 CSV 路径对照表。"),
+            source="upload",
+        )
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="iceberg-path-migrate-") as temp:
+            uploaded_paths = _save_uploads(delete_files, Path(temp))
+            package = build_migration(
+                manifest_file.read(),
+                mapping_file.read(),
+                uploaded_paths,
+                manifest_file.filename,
+            )
+    except CheckError as exc:
+        return _migrate_error(exc, source="upload")
+
+    return _zip_response(package, MIGRATED_ZIP_NAME)
+
+
+@app.get("/migrate/sample")
+def migrate_sample():
+    """Show the built-in crossing-path sample's migration result."""
+
+    package, error = _sample_migration()
+    if error is not None:
+        return _render_migrate(error=error, source="sample", status=400)
+    return _render_migrate(package=package, source="sample")
+
+
+def _sample_migration() -> tuple[MigrationPackage | None, CheckError | None]:
+    manifest_path = SAMPLE_MIGRATE_DIR / "manifest.csv"
+    mapping_path = SAMPLE_MIGRATE_DIR / "path-mapping.csv"
+    try:
+        return (
+            build_migration(
+                manifest_path.read_bytes(),
+                mapping_path.read_bytes(),
+                _sample_migrate_uploads(),
+                manifest_path.name,
+            ),
+            None,
+        )
+    except CheckError as exc:
+        return None, exc
+
+
+@app.get("/migrate/sample.zip")
+def migrate_sample_zip():
+    package, error = _sample_migration()
+    if error is not None:
+        return _render_migrate(error=error, source="sample", status=400)
+    return _zip_response(package, MIGRATED_ZIP_NAME)
+
+
 @app.errorhandler(413)
 def payload_too_large(_error):
-    return _render(
-        error=CheckError(
-            "上传内容超过大小限制 "
-            f"（{app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)} MB）。"
-        ),
-        status=413,
+    message = CheckError(
+        "上传内容超过大小限制 "
+        f"（{app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)} MB）。"
     )
+    if request.path.startswith("/migrate"):
+        return _render_migrate(error=message, status=413)
+    return _render(error=message, status=413)
 
 
 if __name__ == "__main__":

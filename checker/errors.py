@@ -7,12 +7,29 @@ result, which keeps the "no partial conclusions" rule.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class PathConflict:
+    """A path that makes the offline migration unsafe to package."""
+
+    path: str
+    detail: str
+
 
 class CheckError(Exception):
-    def __init__(self, message: str, *, files: list[str] | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        files: list[str] | None = None,
+        conflicts: list[PathConflict] | None = None,
+    ):
         super().__init__(message)
         self.message = message
         self.files = list(files or [])
+        self.conflicts = list(conflicts or [])
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         if self.files:

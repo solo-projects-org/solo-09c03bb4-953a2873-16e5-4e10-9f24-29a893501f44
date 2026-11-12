@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>渡轮结算 · Iceberg 路径离线迁移</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">⛴</span>
+      <div>
+        <h1>渡轮结算 · 路径离线迁移</h1>
+        <p>对象存储换目录 · 不复制数据副本 · 保留位置删除语义</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <a class="button ghost" href="{{ url_for('index') }}">返回核对页</a>
+      <a class="button ghost" href="{{ url_for('migrate_sample') }}">载入样例</a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  {% if error %}
+  <section class="alert" role="alert">
+    <h2>迁移未完成</h2>
+    <p>{{ error.message }}</p>
+    {% if error.conflicts %}
+    <p class="alert-files">冲突路径：</p>
+    <ul class="conflict-list">
+      {% for conflict in error.conflicts %}
+      <li>
+        <span class="mono">{{ conflict.path }}</span>
+        <small>{{ conflict.detail }}</small>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if error.files %}
+    <p class="alert-files">涉及文件：</p>
+    <ul class="file-list">
+      {% for file in error.files %}<li class="mono">{{ file }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    <p class="hint">为避免生成语义错误的路径，本次没有输出 ZIP 包。</p>
+  </section>
+  {% endif %}
+
+  <section class="card flow-card">
+    <div class="card-head">
+      <h2>离线迁移流程</h2>
+      <p class="subtle">
+        只改写清单中的数据路径与删除记录里的 <code>file_path</code>，
+        不读取、也不复制数据文件。迁移包解压后可与数据副本一起提交回原核查页。
+      </p>
+    </div>
+    <ol class="flow-list">
+      <li><b>上传清单</b>：现有格式的 Iceberg v2 CSV 有效文件清单。</li>
+      <li><b>上传路径对照表</b>：CSV，含 <code>old_path</code> 与 <code>new_path</code>。</li>
+      <li><b>上传位置删除 Parquet</b>：清单中的 position_delete 副本，文件名与
+        <code>uploaded_filename</code> 一致；数据文件副本无需上传。</li>
+      <li><b>下载 ZIP</b>：迁移后的清单 + 按 <code>file_path</code>、<code>pos</code>
+        排序的删除文件。</li>
+    </ol>
+    <div class="notice">
+      旧路径必须在对照表中唯一，且必须指向清单内的 <b>data</b> 文件。
+      每个原值只替换一次：新旧路径交叉（A→B、B→A）时仍按迁移前的值查表，
+      不会连环替换。迁移后清单路径重复，或删除记录原先不指向清单内数据文件、
+      迁移后会指向数据文件，都会按冲突路径指出并且不出包。
+    </div>
+    <div class="field-hint">{{ max_upload_mb }} MB 单次上限 · 不保存上传内容 ·
+      只处理位置删除</div>
+  </section>
+
+  <section class="card form-card">
+    <div class="card-head">
+      <h2>离线迁移</h2>
+      <p class="subtle">含等值删除、缺件或读写失败时整次中止，并说明原因。</p>
+    </div>
+    <form method="post" action="{{ url_for('migrate_run') }}" enctype="multipart/form-data">
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">Iceberg v2 CSV 清单</span>
+          <input type="file" name="manifest" accept=".csv,text/csv" required>
+          <span class="field-hint">
+            列：<code>original_path</code>、<code>uploaded_filename</code>、
+            <code>file_type</code>、<code>data_sequence_number</code>
+          </span>
+        </label>
+        <label class="field">
+          <span class="field-label">路径对照表 <small>CSV</small></span>
+          <input type="file" name="mapping" accept=".csv,text/csv" required>
+          <span class="field-hint">
+            列：<code>old_path</code>、<code>new_path</code>；
+            旧路径必须唯一且指向清单内的数据文件
+          </span>
+        </label>
+      </div>
+
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">位置删除 Parquet 副本 <small>可多选</small></span>
+          <input type="file" name="files" accept=".parquet,application/octet-stream" multiple>
+          <span class="field-hint">
+            仅需要 position_delete 副本；文件名须与清单的
+            <code>uploaded_filename</code> 一致
+          </span>
+        </label>
+        <div class="field">
+          <span class="field-label">输出</span>
+          <span class="field-hint">
+            ZIP 内含迁移后的清单，以及保留原文件名、列结构和 Parquet 字段 ID
+            的删除文件。删除行按 <code>file_path</code>、<code>pos</code> 排序，
+            除 <code>file_path</code> 外的值不变。
+          </span>
+          <span class="subtle limit">单次上传上限 {{ max_upload_mb }} MB</span>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="button primary" type="submit">生成迁移 ZIP</button>
+        <a class="button ghost" href="{{ url_for('migrate_sample') }}">载入新旧路径交叉的样例</a>
+        <a class="button ghost" href="{{ url_for('migrate_sample_zip') }}">直接下载样例 ZIP</a>
+      </div>
+    </form>
+  </section>
+
+  {% if package %}
+  <section class="summary">
+    <div class="summary-title">
+      <div>
+        <h2>迁移结果</h2>
+        <p class="subtle">
+          清单 {{ package.manifest_name }} ·
+          删除文件 {{ package.delete_files|length }} 个 ·
+          删除记录 {{ package.total_delete_rows }} 行
+        </p>
+      </div>
+      <span class="badge sample">已生成</span>
+    </div>
+    {% if source == 'sample' %}
+    <div class="form-actions result-actions">
+      <a class="button primary" href="{{ url_for('migrate_sample_zip') }}">下载样例迁移 ZIP</a>
+    </div>
+    {% endif %}
+    <div class="chips">
+      <span class="chip"><b>{{ package.mapping|length }}</b> 条路径替换</span>
+      <span class="chip"><b>{{ package.data_paths_after|length }}</b> 个数据文件路径</span>
+    </div>
+    <div class="table-wrap">
+      <table class="manifest-table">
+        <thead>
+          <tr><th>原路径</th><th>迁移后路径</th></tr>
+        </thead>
+        <tbody>
+          {% for old_path, new_path in package.mapping|dictsort %}
+          <tr>
+            <td class="mono path">{{ old_path }}</td>
+            <td class="mono path">{{ new_path }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <ul class="warnings">
+      {% for warning in package.warnings %}<li>{{ warning }}</li>{% endfor %}
+    </ul>
+    <p class="notice">
+      下载后解压 ZIP，将清单与 Parquet 副本连同数据副本一起提交到
+      <a href="{{ url_for('index') }}">原核查页</a> 即可继续核对撤销票。
+    </p>
+  </section>
+  {% endif %}
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <p>
+      迁移只改变路径字符串：清单列结构与其余值、删除文件的文件名、列结构和
+      字段 ID 全部保留。路径按字符串精确比较，请保证对照表写法与清单完全一致。
+    </p>
+  </div>
+</footer>
+</body>
+</html>
